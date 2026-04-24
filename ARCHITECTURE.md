@@ -261,6 +261,171 @@ which the system gets more trustworthy over time instead of drifting.
 
 ---
 
+## POC → Production: the architectural shift
+
+This section makes the reuse-vs-build decisions concrete. Why each piece is reused vs.
+built, and what the product becomes when the transition completes.
+
+### The shift at a glance
+
+```
+POC (what we have)                         PRODUCTION (target)
+
+CLI REPL                             →     Slack bot + Web UI + Claude Code MCP
+                                             (reuse QueryNow Glean shell)
+
+One tier — always Claude generation  →     Three tiers: Catalog → Genie → KG+SQL
+                                             (reuse Hinge Data Catalog + Genie Spaces)
+
+Hand-rolled Databricks REST client   →     mcp-server-analytics MCP
+                                             (reuse — already security-approved)
+
+PAT in .env                          →     HINGE_SELECT_PHI_SP service principal
+                                             (reuse existing auth infra)
+
+POC's novel pieces:                        Production:
+  proto parser                       →       keep — hardened
+  auto-discovery                     →       keep — hardened
+  KG builder with sharding           →       keep — hardened
+  cross-schema router                →       keep — hardened
+  verifier                           →       keep — hardened
+  validated-query cache              →       keep + promote to Catalog
+
+No narrative                         →     Tier-aware narrator (new)
+No intent classifier                 →     Haiku tier picker (new)
+No trust badges                      →     Per-answer confidence UI (new)
+No follow-up memory                  →     Session state + Genie memory (new)
+```
+
+### Why reuse vs. build — per-component rationale
+
+#### Execution layer → reuse `mcp-server-analytics`
+
+The POC's `databricks.ts` is 130 lines of REST client with polling.
+`mcp-server-analytics` already wraps the same API, with three things the POC doesn't:
+OAuth-based auth, completed security review, and cross-tool consistency.
+
+Maintaining two Databricks clients at HH is strictly worse than contributing to one.
+The POC's client gets deleted.
+
+#### Metric retrieval → reuse Hinge Data Catalog
+
+The POC's `derivable_metrics` is Claude's best guess at business metrics. Hinge Data
+Catalog has 177 human-verified definitions in OSI YAML, with a Python engine, Claude
+Code plugin, and Google Sheets extension.
+
+When a PM asks "how many members enrolled last month," the answer needs to match the
+Mode report number — because Mode reports are built off the same Catalog definitions.
+Anything else creates a split-brain trust problem.
+
+The POC's metric inference becomes advisory ("here's what this schema *could* tell
+you"), not authoritative.
+
+#### User surface → reuse QueryNow Glean agent pattern
+
+PMs use QueryNow. Building a new Slack bot would split user attention and signal
+organizational dysfunction. QueryNow's Glean agent pattern handles Slack auth, user
+identification, and logging — all solved.
+
+Our orchestrator slots in as QueryNow's new backend for schemas not covered by Genie
+Spaces.
+
+#### Auth → reuse service principals
+
+PATs are user-scoped (wrong blast radius), long-lived (no rotation), and have no
+PHI-specific scoping. Service principals fix all three. Rajagopal Parthasarathi runs
+the grant process. No functional loss; strictly better.
+
+#### Genie Spaces → reuse for curated schemas, fall back to Tier 3 for novel
+
+Genie Spaces have three things the POC's one-tier model lacks:
+
+1. Trust bounds (5-20 curated tables per space, small hallucination surface)
+2. Native follow-up memory ("and by region?" works natively)
+3. Free Databricks infrastructure (auth, logs, rate limits, usage tracking)
+
+Tier 2 in production is the Genie dispatch layer, not the POC's Claude-call.
+
+Tier 3 (POC's code) is the fallback for schemas without a Space. We don't pick one
+or the other; we use both.
+
+#### Context patterns → adopt from `databricks-rules`
+
+`databricks-rules` isn't a chatbot — it's a Claude Code context repo by Joe Templeman.
+But the *pattern* is valuable:
+
+- **Schema-as-CSV** is reviewable in PRs (unlike runtime introspection)
+- **Per-domain Markdown docs** let experts hand-tune without editing code
+- **"Probe before commit"** workflow prevents hallucination
+
+The POC's dynamic context + `databricks-rules`' static context complement each other.
+Auto-discover new schemas, write initial CSVs, let experts hand-edit + add topic docs,
+the KG builder reads both.
+
+### What we keep from the POC
+
+These five novel pieces aren't solved anywhere else at HH and become the core
+differentiator of production Pulse:
+
+| Component | Why novel | Production work needed |
+|---|---|---|
+| **Proto parser** (`proto-parser.ts`) | Nobody else parses HH protos; hs_graph has 117 messages + 10 enums of free semantics | Hardening, coverage tests, error reporting |
+| **Auto-discovery** (`config.ts` expandFleetConfig) | Every other tool uses hand-curated schema lists | Cross-catalog, permission-aware filtering |
+| **KG builder with sharding** (`knowledge.ts`) | Three-source (proto + dbt + schema + samples) synthesis | Parallel builds, schema-hash invalidation |
+| **Cross-schema router** (`router.ts`) | Every other tool is single-scope | Learn from feedback, dynamic budget |
+| **Verifier** (`verifier.ts`) | No existing tool audits generated SQL | Better issue classification, retry with fixes |
+| **Validated-query cache** (`learning.ts`) | Trustworthiness grows with use, not drifts | "Promote to Catalog" workflow |
+
+All other POC pieces (narrator, execution, auth, REPL, table sampling) become thin
+adapters or get deleted.
+
+### What the product becomes
+
+The POC answers one question in one schema. Production is a **trust-graded answering
+engine** with:
+
+**One entry point.** Today a PM has to know: "for enrollment numbers go to QueryNow,
+for custom cohort math go to Mode, for HingeSelect graph questions there's nothing."
+Tomorrow it's one Slack command; the orchestrator picks.
+
+**Trust badges on every answer.** 🟢 Verified (Catalog). 🔵 Curated (Genie).
+🟡 Generated + audited (Tier 3). 🟠 Generated, unaudited. ⚪ Not answerable.
+Users calibrate trust quickly — and act confidently on 🟢, review SQL on 🟡, treat
+🟠 as exploratory.
+
+**Novel schemas work immediately.** `hs_eligibility` isn't covered by any tool today.
+Tomorrow, Tier 3 auto-discovers it on first question. Imperfectly at first. More
+accurately as the validated-query cache grows.
+
+**Cross-schema questions work.** "Which employers have the highest outstanding invoices
+relative to their enrolled members?" spans three schemas. Today: impossible in one
+tool. Tomorrow: Tier 3 routes across `hs_employerinvoice`, `hs_enrollment`,
+`hs_accounts_customer`.
+
+**Follow-up memory.** "And by region?" works after a first question — via Genie's
+native memory (Tier 2) or session state (Tier 1, 3).
+
+**Feedback loop.** Every Tier 3 answer saved via `👍` becomes a Tier 1 candidate.
+The Catalog grows from 177 metrics toward ~500 over a year — without Shreya's team
+having to write them from scratch.
+
+### What the tool *is* from the ecosystem's perspective
+
+- **To PMs:** "the one place to ask data questions in Slack"
+- **To analysts:** "saves me writing SQL for 60% of ad-hoc asks; I still vet the 🟡 answers"
+- **To data engineers:** "the tool that surfaces when our schema docs are incomplete —
+  each low-confidence answer is a doc gap"
+- **To the data platform team:** "the orchestrator layer that composes our existing
+  tools instead of competing with them"
+
+**The framing that matters most:** if anyone reads this doc and walks away thinking
+"we're building a new NL→SQL tool," they've misread it. **We're building the
+orchestrator that routes between what HH already has**, plus a Tier 3 fallback for
+schemas not covered yet. Tier 3 is 30% of the POC's code; the other 70% is
+infrastructure that already exists.
+
+---
+
 ## Phasing
 
 ### Phase 0 — prerequisites (weeks 0-2)
@@ -294,6 +459,15 @@ which the system gets more trustworthy over time instead of drifting.
 - Package Tier 3 context as an MCP server
 - Distribute via Claude Code
 - **Ship:** devs have proto-enriched context available for any schema
+
+### Phase 5 — feedback loop maturation (weeks 18-24)
+- Automate "promote Tier 3 validated query to Catalog" workflow (integrate with
+  Shreya's review process — PR against Hinge Data Catalog YAML from validated queries)
+- Add schema-specific topic docs for any domain with accuracy <75%
+- Expand to non-`hs_*` catalogs if demand exists (e.g., `prod.iterable`, `prod.rollups`)
+- Measure: how many Tier 3 answers per week get promoted into the Catalog?
+- **Ship:** self-improving system. Over 6 months, the Catalog grows from 177 to
+  ~500 metrics, each promoted from a real question a user validated.
 
 ---
 

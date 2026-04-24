@@ -293,7 +293,13 @@ synthesis, execution).
 
 ## What we'd change for production
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full plan. Summary:
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for the full plan — specifically the
+**"POC → Production: the architectural shift"** section, which covers per-component
+reuse-vs-build rationale (why `mcp-server-analytics` replaces our Databricks client,
+why Hinge Data Catalog replaces our `derivable_metrics`, why QueryNow replaces the
+REPL, etc.) and **"What the product becomes"** for the next-phase vision.
+
+Summary of the changes:
 
 ### Delete (reinvented existing infrastructure)
 
