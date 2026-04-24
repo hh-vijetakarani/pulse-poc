@@ -63,7 +63,21 @@ overrides:
     #   - additional_phi_column_name
 
   mixpanel_phoenix:
-    aliases: [phoenix, care_search_events]
+    # Strong aliases matter — the router uses these heavily when the schema
+    # hasn't been built yet. "care_search", "clicks", "funnel", and "product_analytics"
+    # all route question keywords toward this schema.
+    aliases:
+      - phoenix
+      - product_analytics
+      - product_events
+      - care_search
+      - care_search_events
+      - clicks
+      - funnel
+      - user_behavior
+      - user_analytics
+      - app_events
+      - engagement
     # Event tables can have 100M+ rows. The default 1M cap would skip DISTINCT
     # sampling on the `event_name` column, which is exactly the column Claude
     # needs to learn the event taxonomy (e.g. "Care Search Opened",

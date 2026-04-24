@@ -1,4 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { existsSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { SchemaConfig } from "./config.js";
 import type { FleetKnowledgeGraph } from "./types.js";
 
@@ -7,13 +9,24 @@ const ROUTER_MODEL = "claude-haiku-4-5";
 const client = new Anthropic();
 
 const ROUTER_SYSTEM_PROMPT = `You are a schema router. Given a natural language question and
-a list of schemas (some already introspected, some only known by name), pick the 1-3 schemas
-most likely to contain tables needed to answer the question.
+a list of schemas (some already introspected, some only known by name + aliases + a purpose
+hint), pick the 1-3 schemas most likely to contain tables needed to answer the question.
 
-Some schemas show a "Purpose hint:" line — that's the richest signal. Others show only their
-name and aliases ("not yet introspected") — the schema NAME itself is usually informative
-(e.g. "hs_eligibility" handles eligibility questions, "hs_enrollment" handles enrollment).
-Use name + aliases alone when that's all you have.
+Use all available signals:
+- "Purpose hint:" — richest signal; trust it.
+- Aliases — often carry feature names ("care_search", "clicks", "funnel") that map directly
+  to question concepts even when the schema NAME doesn't.
+- Schema name — "hs_eligibility" handles eligibility questions, "mixpanel_*" handles
+  product-analytics / event-stream questions.
+
+Important tie-breakers:
+- "How many users ..." or "where do users drop off ..." or "funnel" / "click" / "convert"
+  are product-analytics questions → route to mixpanel_* schemas if available.
+- "Customer account" or "employer" or "legal entity" are account-management questions
+  → route to hs_accounts_* schemas.
+- "Eligibility check" / "benefits" → route to hs_eligibility.
+- Don't let a single word like "customer" or "user" dominate if the rest of the question
+  is about a specific feature (care search, enrollment flow, etc.).
 
 Respond with ONLY valid JSON: {"schema_ids": ["id1", "id2"]}
 
@@ -43,6 +56,38 @@ function parseJson<T>(raw: string): T {
   }
 }
 
+function notesDocHint(cfg: SchemaConfig): string | null {
+  if (!cfg.notes_doc) return null;
+  const path = resolve(cfg.notes_doc);
+  if (!existsSync(path)) return null;
+  try {
+    // Find the first meaningful paragraph after the title. This becomes the
+    // router's "purpose hint" for an unbuilt schema — strong signal for Haiku.
+    const text = readFileSync(path, "utf-8");
+    const lines = text.split("\n");
+    const paragraphs: string[] = [];
+    let current: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith("#") || line.startsWith("---")) {
+        if (current.length) paragraphs.push(current.join(" "));
+        current = [];
+        continue;
+      }
+      if (line.trim() === "") {
+        if (current.length) paragraphs.push(current.join(" "));
+        current = [];
+        continue;
+      }
+      current.push(line.trim());
+    }
+    if (current.length) paragraphs.push(current.join(" "));
+    const firstMeaningful = paragraphs.find((p) => p.length > 40);
+    return firstMeaningful ? firstMeaningful.slice(0, 240) : null;
+  } catch {
+    return null;
+  }
+}
+
 function buildRouterSummary(
   fleet: FleetKnowledgeGraph,
   configSchemas: SchemaConfig[],
@@ -55,6 +100,7 @@ function buildRouterSummary(
   for (const cfg of configSchemas) {
     if (!active.has(cfg.id)) continue;
     const kg = builtById.get(cfg.id);
+    const aliasHint = cfg.aliases.length ? ` (aliases: ${cfg.aliases.join(", ")})` : "";
 
     if (kg && kg.tables.length > 0) {
       const domains = [...new Set(kg.tables.map((t) => t.domain))].slice(0, 3).join(",");
@@ -66,15 +112,22 @@ function buildRouterSummary(
         .join(",");
       const purposeHint = kg.tables[0]!.purpose.slice(0, 140);
       lines.push(
-        `- ${cfg.id} (${cfg.catalog}.${cfg.schema}) [domains: ${domains}] top tables: ${topTables}\n  Purpose hint: ${purposeHint}`,
+        `- ${cfg.id} (${cfg.catalog}.${cfg.schema})${aliasHint} [domains: ${domains}] top tables: ${topTables}\n  Purpose hint: ${purposeHint}`,
       );
     } else {
-      // Unbuilt — supply only name + catalog + aliases. Schema name is usually
-      // informative enough for Haiku to route on.
-      const aliasHint = cfg.aliases.length ? ` (aliases: ${cfg.aliases.join(", ")})` : "";
-      lines.push(
-        `- ${cfg.id} (${cfg.catalog}.${cfg.schema})${aliasHint} — not yet introspected`,
-      );
+      // Unbuilt — use the notes_doc as a purpose hint if available. The topic
+      // doc's first paragraph usually describes what the schema is for, which
+      // is enough signal for Haiku to route on.
+      const docHint = notesDocHint(cfg);
+      if (docHint) {
+        lines.push(
+          `- ${cfg.id} (${cfg.catalog}.${cfg.schema})${aliasHint} — not yet introspected\n  Purpose hint (from curated doc): ${docHint}`,
+        );
+      } else {
+        lines.push(
+          `- ${cfg.id} (${cfg.catalog}.${cfg.schema})${aliasHint} — not yet introspected`,
+        );
+      }
     }
   }
   return lines.join("\n");
