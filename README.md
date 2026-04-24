@@ -3,7 +3,7 @@
 A POC for schema-agnostic natural-language querying of Databricks, using LLM-inferred
 knowledge graphs and proto/dbt-enriched context.
 
-**Status:** working POC, ~1,600 lines of TypeScript, built in 2 days. Not production.
+**Status:** working POC. Not production.
 Validates specific design choices before integrating with Hinge Health's existing
 NL→SQL ecosystem (QueryNow, Genie Spaces, Hinge Data Catalog, `mcp-server-analytics`).
 
