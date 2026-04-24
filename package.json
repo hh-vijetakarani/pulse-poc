@@ -1,0 +1,23 @@
+{
+  "name": "pulse-poc",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Schema-agnostic data intelligence POC for Databricks with protobuf context",
+  "scripts": {
+    "pulse": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.0",
+    "@types/js-yaml": "^4.0.9",
+    "dotenv": "^16.4.5",
+    "js-yaml": "^4.1.1",
+    "protobufjs": "^7.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

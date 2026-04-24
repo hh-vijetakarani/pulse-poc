@@ -1,0 +1,63 @@
+# Pulse — fleet configuration
+#
+# Two ways to declare schemas:
+#   1. `auto_discover` — scan a catalog at startup and pick every schema matching
+#      a glob pattern. No hand-maintained list; picks up new schemas automatically.
+#   2. `schemas` — explicit entries (useful for cross-catalog schemas or one-offs).
+#
+# Per-schema knobs (protos path, aliases, tighter PHI patterns) can be set in
+# `overrides` keyed by schema id (= schema name).
+
+auto_discover:
+  catalogs: [prod]           # catalogs to scan
+  include: ["hs_*"]          # glob patterns for schema names
+  exclude: []                # glob patterns to skip (e.g. ["hs_internal_*"])
+
+defaults:
+  # Which schemas are queryable at startup. Supports:
+  #   all | <id> | <id1>,<id2> | <catalog>.* | <glob> (e.g. hs_graph | hs_*)
+  #
+  # Default "hs_*" matches every discovered hs_* schema. Only the first
+  # schema touched (by a question or `use`) pays the one-time KG build cost;
+  # questions are routed through a cheap Haiku pre-filter that picks the
+  # 1-3 most relevant schemas per question.
+  #
+  # Pin to a single schema (e.g. `active: hs_graph`) if you want to scope
+  # every question to that schema only — routing is skipped when active = 1.
+  active: hs_*
+
+  # Baseline PHI-unsafe column-name patterns. Case-insensitive substring match.
+  phi_skip_patterns:
+    - name
+    - first_name
+    - last_name
+    - email
+    - phone
+    - ssn
+    - dob
+    - date_of_birth
+    - address
+    - street
+    - city
+
+  # Applied to every discovered schema unless the schema has its own override.
+  phi_skip_patterns_add:
+    - mrn
+    - patient_id
+    - member_id
+    - subscriber_id
+    - ip_address
+    - device_id
+
+  # When active schemas > threshold, a cheap Haiku pre-filter routes each
+  # question to 1-3 schemas before the main classifier runs.
+  large_fleet_threshold: 10
+
+# Per-schema overrides — keyed by schema name (the id). Everything here is
+# optional; unset fields inherit from defaults.
+overrides:
+  hs_graph:
+    aliases: [hs, graph, kg]
+    protos: protos/
+    # phi_skip_patterns_add:
+    #   - additional_phi_column_name

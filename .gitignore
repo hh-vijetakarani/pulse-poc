@@ -1,0 +1,28 @@
+# Secrets — never commit
+.env
+.env.local
+.env.*.local
+
+# Runtime state — user-specific, may contain real questions/data
+cache/
+learning/*.json
+!learning/.gitkeep
+
+# Internal proto files — fetch from Hinge-Select/hinge-select on setup
+# (They're internal; excluded here to keep this repo self-contained
+#  without re-exposing protos outside their source repo.)
+protos/*.proto
+
+# Build artifacts
+node_modules/
+dist/
+*.log
+*.tsbuildinfo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
