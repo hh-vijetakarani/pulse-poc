@@ -11,10 +11,9 @@ import type {
 
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
-// Above this row count, skip expensive DISTINCT sampling (the LIMIT 5 still runs).
-// System metadata tables can have tens of millions of rows and a DISTINCT query
-// can run for minutes — not worth the wait for slightly richer value examples.
-const DISTINCT_SAMPLING_ROW_CAP = 1_000_000;
+// Per-schema row cap for DISTINCT sampling is now configured on SchemaConfig
+// (`distinct_sampling_row_cap`). Schemas with event streams (e.g. mixpanel_*)
+// should set a much higher cap so DISTINCT event_name values survive sampling.
 
 function schemaCacheDir(schemaId: string): string {
   return resolve("cache", schemaId);
@@ -229,7 +228,7 @@ export async function sampleTables(
       rowCount = 0;
     }
 
-    if (rowCount <= DISTINCT_SAMPLING_ROW_CAP) {
+    if (rowCount <= cfg.distinct_sampling_row_cap) {
       for (const col of safeColumns) {
         if (!isStringLike(col.data_type)) continue;
         try {
@@ -246,7 +245,7 @@ export async function sampleTables(
       }
     } else {
       onProgress?.(
-        `      skipping DISTINCT sampling for ${tn} (${rowCount.toLocaleString()} rows > ${DISTINCT_SAMPLING_ROW_CAP.toLocaleString()} cap)`,
+        `      skipping DISTINCT sampling for ${tn} (${rowCount.toLocaleString()} rows > ${cfg.distinct_sampling_row_cap.toLocaleString()} cap)`,
       );
     }
 

@@ -5,6 +5,18 @@ import type { SchemaConfig } from "./config.js";
 import { formatDbtForClaude, matchDbtToTables } from "./dbt-parser.js";
 import { lintKg, normalizeKg } from "./kg-validator.js";
 import { formatProtoForClaude } from "./proto-parser.js";
+
+function loadNotesDoc(cfg: SchemaConfig): string | null {
+  if (!cfg.notes_doc) return null;
+  const path = resolve(cfg.notes_doc);
+  if (!existsSync(path)) return null;
+  try {
+    // Cap at 6K chars so it doesn't blow the context budget.
+    return readFileSync(path, "utf-8").slice(0, 6000);
+  } catch {
+    return null;
+  }
+}
 import type {
   ColumnInfo,
   DbtContext,
@@ -193,6 +205,13 @@ function buildKgContext(
 
   if (dbt.models.length) {
     parts.push(formatDbtForClaude(dbt));
+    parts.push("");
+  }
+
+  const notes = loadNotesDoc(cfg);
+  if (notes) {
+    parts.push(`=== CURATED TOPIC DOC for ${cfg.id} (hand-maintained domain context) ===`);
+    parts.push(notes);
     parts.push("");
   }
 

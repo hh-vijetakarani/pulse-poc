@@ -10,7 +10,7 @@
 
 auto_discover:
   catalogs: [prod]           # catalogs to scan
-  include: ["hs_*"]          # glob patterns for schema names
+  include: ["hs_*", "mixpanel_*"]  # glob patterns for schema names
   exclude: []                # glob patterns to skip (e.g. ["hs_internal_*"])
 
 defaults:
@@ -61,3 +61,41 @@ overrides:
     protos: protos/
     # phi_skip_patterns_add:
     #   - additional_phi_column_name
+
+  mixpanel_phoenix:
+    aliases: [phoenix, care_search_events]
+    # Event tables can have 100M+ rows. The default 1M cap would skip DISTINCT
+    # sampling on the `event_name` column, which is exactly the column Claude
+    # needs to learn the event taxonomy (e.g. "Care Search Opened",
+    # "Care Search Result Clicked"). Override to a much higher cap.
+    distinct_sampling_row_cap: 500_000_000
+    # Curated topic doc that lists known Care Search funnel stages, identifier
+    # columns, and known data-quality issues. Loaded into KG build context.
+    notes_doc: docs/mixpanel_phoenix.md
+    phi_skip_patterns_add:
+      # Device/user identifiers that Mixpanel routinely carries
+      - distinct_id
+      - device_id
+      - $device_id
+      - ip
+      - $ip
+      - user_agent
+      - $user_agent
+      - browser
+      - $browser
+
+  mixpanel_care_team:
+    aliases: [care_team_events]
+    distinct_sampling_row_cap: 500_000_000
+    phi_skip_patterns_add:
+      - distinct_id
+      - device_id
+      - ip
+
+  mixpanel_coaching:
+    aliases: [coaching_events]
+    distinct_sampling_row_cap: 500_000_000
+    phi_skip_patterns_add:
+      - distinct_id
+      - device_id
+      - ip

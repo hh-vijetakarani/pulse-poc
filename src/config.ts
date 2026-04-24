@@ -10,6 +10,8 @@ export interface SchemaConfig {
   protos: string | null;
   dbt: string | null;
   phi_skip_patterns: string[];
+  distinct_sampling_row_cap: number;
+  notes_doc: string | null;
 }
 
 export interface SchemaOverride {
@@ -18,6 +20,20 @@ export interface SchemaOverride {
   dbt?: string | null;
   phi_skip_patterns?: string[];
   phi_skip_patterns_add?: string[];
+  /**
+   * Tables with more rows than this skip DISTINCT sampling during discovery.
+   * Default is 1_000_000 — fine for entity tables, too low for event streams
+   * (e.g. mixpanel_*) where you need distinct event names from large tables.
+   * Set to a very large number (or Number.MAX_SAFE_INTEGER) to effectively
+   * disable the cap.
+   */
+  distinct_sampling_row_cap?: number;
+  /**
+   * Path to a markdown "topic doc" with domain-specific context for this
+   * schema (funnel definitions, event taxonomy, business rules). Loaded
+   * during KG build as additional context.
+   */
+  notes_doc?: string | null;
 }
 
 export interface AutoDiscoverSpec {
@@ -35,6 +51,7 @@ export interface FleetConfig {
   auto_discover: AutoDiscoverSpec | null;
   baseline_phi: string[];
   baseline_overrides: SchemaOverride;
+  baseline_distinct_sampling_row_cap: number;
   overrides: Record<string, SchemaOverride>;
 }
 
@@ -46,6 +63,7 @@ interface RawFleetYaml {
     phi_skip_patterns_add?: string[];
     protos?: string | null;
     dbt?: string | null;
+    distinct_sampling_row_cap?: number;
   };
   auto_discover?: {
     catalogs?: string[];
@@ -62,8 +80,12 @@ interface RawFleetYaml {
     dbt?: string | null;
     phi_skip_patterns?: string[];
     phi_skip_patterns_add?: string[];
+    distinct_sampling_row_cap?: number;
+    notes_doc?: string | null;
   }>;
 }
+
+const DEFAULT_DISTINCT_SAMPLING_ROW_CAP = 1_000_000;
 
 const DEFAULT_PHI = [
   "name",
@@ -119,6 +141,8 @@ function buildFromYaml(raw: RawFleetYaml): FleetConfig {
     protos: defaults.protos ?? null,
     dbt: defaults.dbt ?? null,
   };
+  const baselineDistinctCap =
+    defaults.distinct_sampling_row_cap ?? DEFAULT_DISTINCT_SAMPLING_ROW_CAP;
   const largeFleetThreshold = defaults.large_fleet_threshold ?? 10;
   const activeSpec = (defaults.active ?? "all").trim();
   const overrides = raw.overrides ?? {};
@@ -133,7 +157,7 @@ function buildFromYaml(raw: RawFleetYaml): FleetConfig {
   }
 
   const schemas: SchemaConfig[] = (raw.schemas ?? []).map((s) =>
-    materializeFromExplicit(s, baselinePhi, baselineOverrides),
+    materializeFromExplicit(s, baselinePhi, baselineOverrides, baselineDistinctCap),
   );
 
   // Active IDs can only be resolved for explicit schemas now. Auto-discovered ones
@@ -151,6 +175,7 @@ function buildFromYaml(raw: RawFleetYaml): FleetConfig {
     auto_discover: autoDiscover,
     baseline_phi: baselinePhi,
     baseline_overrides: baselineOverrides,
+    baseline_distinct_sampling_row_cap: baselineDistinctCap,
     overrides,
   };
 }
@@ -159,6 +184,7 @@ function materializeFromExplicit(
   entry: NonNullable<RawFleetYaml["schemas"]>[number],
   baselinePhi: string[],
   baselineOverrides: SchemaOverride,
+  baselineDistinctCap: number,
 ): SchemaConfig {
   if (!entry.id || !entry.catalog || !entry.schema) {
     throw new Error(`Schema entry missing required fields: ${JSON.stringify(entry)}`);
@@ -179,6 +205,8 @@ function materializeFromExplicit(
     protos: entry.protos ?? baselineOverrides.protos ?? null,
     dbt: entry.dbt ?? baselineOverrides.dbt ?? null,
     phi_skip_patterns: phi,
+    distinct_sampling_row_cap: entry.distinct_sampling_row_cap ?? baselineDistinctCap,
+    notes_doc: entry.notes_doc ?? null,
   };
 }
 
@@ -209,6 +237,9 @@ function materializeFromDiscovery(
     protos: override.protos ?? cfg.baseline_overrides.protos ?? null,
     dbt: override.dbt ?? cfg.baseline_overrides.dbt ?? null,
     phi_skip_patterns: phi,
+    distinct_sampling_row_cap:
+      override.distinct_sampling_row_cap ?? cfg.baseline_distinct_sampling_row_cap,
+    notes_doc: override.notes_doc ?? null,
   };
 }
 
@@ -228,6 +259,8 @@ function buildFromEnv(): FleetConfig {
     protos,
     dbt: null,
     phi_skip_patterns: phi,
+    distinct_sampling_row_cap: DEFAULT_DISTINCT_SAMPLING_ROW_CAP,
+    notes_doc: null,
   };
 
   return {
@@ -239,6 +272,7 @@ function buildFromEnv(): FleetConfig {
     auto_discover: null,
     baseline_phi: phi,
     baseline_overrides: {},
+    baseline_distinct_sampling_row_cap: DEFAULT_DISTINCT_SAMPLING_ROW_CAP,
     overrides: {},
   };
 }
