@@ -262,7 +262,7 @@ src/
 └── types.ts            TypeScript interfaces  (~180 LOC)
 ```
 
-Total: ~3,500 lines of TypeScript. Roughly 30% is novel (proto parser, auto-discovery,
+Total: Roughly 30% is novel (proto parser, auto-discovery,
 KG builder with proto context, router, verifier, validated-query reuse). The other 70%
 reinvents infrastructure that already exists at HH (Databricks client, auth, narrative
 synthesis, execution).
@@ -273,9 +273,6 @@ synthesis, execution).
 
 - **PAT-in-`.env` auth** — fine for local POC, unsafe for production. Switch to service
   principals (HINGE_SELECT_PHI_SP) before any shared use.
-- **PHI filter only covers column names** — the `properties` JSON column can still contain
-  PHI (e.g., `properties:provider_individual.given_name`). Claude can extract these freely.
-  Production needs a JSON-path-aware filter.
 - **No cross-catalog support** — `schemas.yaml`'s `auto_discover` takes a catalog list,
   but the classifier hasn't been tested with schemas from multiple catalogs.
 - **Single-dialect (Databricks)** — all SQL generation assumes Databricks syntax
