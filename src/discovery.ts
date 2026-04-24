@@ -15,6 +15,11 @@ const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 // (`distinct_sampling_row_cap`). Schemas with event streams (e.g. mixpanel_*)
 // should set a much higher cap so DISTINCT event_name values survive sampling.
 
+// Per-query timeout for sampling. 30 seconds is enough for SELECT LIMIT 5 on
+// any reasonably-indexed table; if a table's queries exceed this, we'd rather
+// skip it than wait. Slow tables fail fast, sampling moves on.
+const SAMPLE_MAX_POLLS = 15;
+
 function schemaCacheDir(schemaId: string): string {
   return resolve("cache", schemaId);
 }
@@ -210,17 +215,19 @@ export async function sampleTables(
     try {
       const sampleRes = await databricks.executeStatement(
         `SELECT ${colList} FROM ${fq(tn)} LIMIT 5`,
+        { maxPolls: SAMPLE_MAX_POLLS },
       );
       sampleRows = sampleRes.data;
     } catch (err) {
       onProgress?.(
-        `  warn: sample failed for ${cfg.id}.${tn}: ${(err as Error).message.slice(0, 80)}`,
+        `      sample skipped for ${tn}: ${(err as Error).message.slice(0, 80)}`,
       );
     }
 
     try {
       const countRes = await databricks.executeStatement(
         `SELECT COUNT(*) AS n FROM ${fq(tn)}`,
+        { maxPolls: SAMPLE_MAX_POLLS },
       );
       const raw = countRes.data[0]?.n;
       rowCount = typeof raw === "number" ? raw : Number(raw ?? 0);
@@ -234,13 +241,14 @@ export async function sampleTables(
         try {
           const distRes = await databricks.executeStatement(
             `SELECT DISTINCT ${quoteIdent(col.column_name)} AS v FROM ${fq(tn)} WHERE ${quoteIdent(col.column_name)} IS NOT NULL LIMIT 30`,
+            { maxPolls: SAMPLE_MAX_POLLS },
           );
           const vals = distRes.data
             .map((r) => (r.v === null || r.v === undefined ? null : String(r.v)))
             .filter((v): v is string => v !== null && v.length < 200);
           if (vals.length > 0) distinctValues[col.column_name] = vals;
         } catch {
-          // Skip distinct sampling failures
+          // Skip distinct sampling failures (incl. timeout)
         }
       }
     } else {

@@ -1,7 +1,7 @@
 import type { QueryResult } from "./types.js";
 
 const POLL_INTERVAL_MS = 2000;
-const MAX_POLLS = 60;
+const DEFAULT_MAX_POLLS = 60;
 
 interface StatementResponse {
   statement_id: string;
@@ -49,8 +49,12 @@ class DatabricksClient {
     };
   }
 
-  async executeStatement(sql: string): Promise<QueryResult> {
+  async executeStatement(
+    sql: string,
+    options: { maxPolls?: number } = {},
+  ): Promise<QueryResult> {
     const start = Date.now();
+    const maxPolls = options.maxPolls ?? DEFAULT_MAX_POLLS;
 
     const submitResp = await fetch(`${this.host}/api/2.0/sql/statements/`, {
       method: "POST",
@@ -75,7 +79,7 @@ class DatabricksClient {
 
     while (
       (payload.status.state === "PENDING" || payload.status.state === "RUNNING") &&
-      polls < MAX_POLLS
+      polls < maxPolls
     ) {
       await sleep(POLL_INTERVAL_MS);
       polls++;
@@ -94,7 +98,18 @@ class DatabricksClient {
     }
 
     if (payload.status.state !== "SUCCEEDED") {
-      const errMsg = payload.status.error?.message ?? `state=${payload.status.state}`;
+      // Best-effort cancel so the statement doesn't keep burning warehouse time.
+      if (payload.statement_id && payload.status.state === "RUNNING") {
+        try {
+          await fetch(
+            `${this.host}/api/2.0/sql/statements/${payload.statement_id}/cancel`,
+            { method: "POST", headers: this.headers() },
+          );
+        } catch {
+          // ignore — best-effort
+        }
+      }
+      const errMsg = payload.status.error?.message ?? `state=${payload.status.state} after ${polls} polls (~${(polls * POLL_INTERVAL_MS) / 1000}s)`;
       throw new Error(`Databricks query failed: ${errMsg}`);
     }
 
