@@ -11,8 +11,9 @@ function loadNotesDoc(cfg: SchemaConfig): string | null {
   const path = resolve(cfg.notes_doc);
   if (!existsSync(path)) return null;
   try {
-    // Cap at 6K chars so it doesn't blow the context budget.
-    return readFileSync(path, "utf-8").slice(0, 6000);
+    // 8K is enough for the full curated docs we have today (~9KB max) while
+    // keeping the SQL-gen prompt under ~2K tokens of guidance.
+    return readFileSync(path, "utf-8").slice(0, 8000);
   } catch {
     return null;
   }
@@ -91,6 +92,9 @@ async function buildSchemaKg(
       // Run cached KGs through the same normalization path — protects against
       // stale cache shapes from earlier builds that predate the validator.
       const { kg: normalized } = normalizeKg(cached);
+      // Reload the notes doc fresh on every hydration so edits to the topic
+      // doc take effect on restart without forcing a full KG rebuild.
+      normalized.notes_excerpt = loadNotesDoc(cfg) ?? undefined;
       return normalized;
     } catch {
       // rebuild
@@ -119,6 +123,10 @@ async function buildSchemaKg(
 
   ensureDir(schemaCacheDir(cfg.id));
   writeFileSync(kgPath, JSON.stringify(kg, null, 2));
+
+  // Attach AFTER persisting the cache file, so the doc isn't redundantly
+  // duplicated on disk and edits apply on every restart.
+  kg.notes_excerpt = loadNotesDoc(cfg) ?? undefined;
 
   onProgress?.(`[${cfg.id}] Generating seed context briefing...`);
   try {

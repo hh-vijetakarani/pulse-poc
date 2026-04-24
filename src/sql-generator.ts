@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { findTable } from "./knowledge.js";
+import { findTable, schemaKgById } from "./knowledge.js";
 import { incrementValidatedUse } from "./learning.js";
 import type {
   ClassificationResult,
@@ -32,6 +32,11 @@ STRICT RULES:
     \`properties:merchant.name::string\` or \`get_json_object(properties, '$.merchant.name')\`.
 11. Prefer aggregations over raw row dumps.
 12. Alias all calculated columns with readable names (snake_case).
+13. If a "TOPIC GUIDANCE" section is provided for a schema, follow its SQL
+    patterns precisely — they're hand-curated for that schema's quirks (event
+    taxonomies, lookup tables, known data-quality issues). When the doc says
+    to discover values via a lookup table (e.g. \`SELECT name FROM event_types
+    WHERE LOWER(name) LIKE '%foo%'\`) instead of hardcoding, do exactly that.
 
 Respond with ONLY valid JSON — no prose, no markdown fences:
 
@@ -186,9 +191,22 @@ export async function generateSQL(
     ? `Suggested metric pattern:\n  ${classification.matched_metric.name}: ${classification.matched_metric.sql_pattern}`
     : "";
 
+  // For each relevant schema with a curated topic doc, surface the full doc
+  // so Claude can copy hand-written SQL patterns verbatim. The classifier
+  // sees only a short hint; the SQL gen needs the full patterns.
+  const topicGuidance = [...relevantSchemas]
+    .map((sid) => {
+      const kg = schemaKgById(fleet, sid);
+      if (!kg?.notes_excerpt) return null;
+      return `=== TOPIC GUIDANCE for ${sid} ===\n${kg.notes_excerpt}`;
+    })
+    .filter((s): s is string => s !== null)
+    .join("\n\n");
+
   const userContent = [
     `Question: ${question}`,
     "",
+    topicGuidance,
     tableCtx,
     `Corrections:\n${relevantCorrections}`,
     paramsBlock,

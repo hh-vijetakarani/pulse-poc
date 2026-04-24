@@ -106,6 +106,11 @@ export interface KnowledgeGraph {
   sample_questions: string[];
   proto_enriched: boolean;
   dbt_enriched: boolean;
+  // Curated topic doc content (from cfg.notes_doc). Loaded fresh on every KG
+  // hydration so doc edits take effect without a cache rebuild. Threaded into
+  // the classifier (as a short hint) and the SQL generator (full content) so
+  // hand-written SQL patterns survive past the structural KG compression.
+  notes_excerpt?: string;
 }
 
 // Fleet-level: all configured schemas' KGs combined (this is what the classifier sees).

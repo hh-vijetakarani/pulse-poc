@@ -123,6 +123,12 @@ function buildCompactFleetSummary(
     if (!selected.has(kg.schema_id)) continue;
     const tables = kg.tables ?? [];
     parts.push(`== [${kg.schema_id}] ${kg.catalog}.${kg.schema} (${tables.length} tables) ==`);
+    if (kg.notes_excerpt) {
+      // Short hint only — enough to nudge table selection (e.g. include
+      // event_types as a lookup for Care Search). Full doc goes to SQL gen.
+      const hint = kg.notes_excerpt.slice(0, 800).replace(/\s+/g, " ").trim();
+      parts.push(`  Curated guidance: ${hint}`);
+    }
     for (const t of tables) {
       const joinTargets = (t.join_keys ?? []).map((j) => j.joins_to).slice(0, 4).join(",");
       const keyCols = (t.key_columns ?? []).slice(0, 6).map((k) => k.column).join(",");
