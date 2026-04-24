@@ -281,28 +281,38 @@ export function resolveActiveIds(spec: string, schemas: SchemaConfig[]): string[
   const allIds = schemas.map((s) => s.id);
   if (!spec || spec === "all") return allIds;
 
-  // catalog glob: "prod.*"
-  if (spec.endsWith(".*")) {
-    const catalog = spec.slice(0, -2);
-    return schemas.filter((s) => s.catalog === catalog).map((s) => s.id);
-  }
-
-  // If it contains a glob wildcard, treat the whole thing as a glob on schema id
-  if (spec.includes("*") || spec.includes("?")) {
-    const re = globToRegex(spec);
-    return schemas.filter((s) => re.test(s.id)).map((s) => s.id);
-  }
-
-  // comma-list of ids/aliases
-  const requested = spec
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  // Split by comma first — each part can independently be a glob, a
+  // catalog-wildcard ("prod.*"), a schema id, or an alias.
+  const parts = spec.split(",").map((s) => s.trim()).filter(Boolean);
   const resolved: string[] = [];
-  for (const req of requested) {
-    const match = schemas.find((s) => s.id === req || s.aliases.includes(req));
+
+  for (const part of parts) {
+    // catalog glob: "prod.*"
+    if (part.endsWith(".*") && !part.includes("*", 0)) {
+      // only treat as catalog glob if the "*" is the final segment
+    }
+    if (part.endsWith(".*") && part.indexOf("*") === part.length - 1) {
+      const catalog = part.slice(0, -2);
+      for (const s of schemas) {
+        if (s.catalog === catalog && !resolved.includes(s.id)) resolved.push(s.id);
+      }
+      continue;
+    }
+
+    // schema-id glob (e.g. "hs_*" or "*_events")
+    if (part.includes("*") || part.includes("?")) {
+      const re = globToRegex(part);
+      for (const s of schemas) {
+        if (re.test(s.id) && !resolved.includes(s.id)) resolved.push(s.id);
+      }
+      continue;
+    }
+
+    // exact id or alias
+    const match = schemas.find((s) => s.id === part || s.aliases.includes(part));
     if (match && !resolved.includes(match.id)) resolved.push(match.id);
   }
+
   return resolved;
 }
 

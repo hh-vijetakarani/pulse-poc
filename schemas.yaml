@@ -11,20 +11,26 @@
 auto_discover:
   catalogs: [prod]           # catalogs to scan
   include: ["hs_*", "mixpanel_*"]  # glob patterns for schema names
-  exclude: []                # glob patterns to skip (e.g. ["hs_internal_*"])
+  # Skip Fivetran staging clones — they're Mixpanel-raw-replica schemas that
+  # duplicate the main tables. Keep the canonical ones (mixpanel_phoenix,
+  # mixpanel_care_team, mixpanel_coaching, mixpanel_onboarding, mixpanel_carehub_app).
+  exclude:
+    - "*_stg_mixpanel"
+    - "*_mixpanel_mixpanel"   # if this double-suffix pattern exists
+    - "mixpanel_*_mixpanel"
 
 defaults:
   # Which schemas are queryable at startup. Supports:
-  #   all | <id> | <id1>,<id2> | <catalog>.* | <glob> (e.g. hs_graph | hs_*)
+  #   all | <id> | <id1>,<id2> | <catalog>.* | <glob> | mixed combinations
+  #   (e.g. "hs_*,mixpanel_*" to activate every schema matching either glob)
   #
-  # Default "hs_*" matches every discovered hs_* schema. Only the first
-  # schema touched (by a question or `use`) pays the one-time KG build cost;
-  # questions are routed through a cheap Haiku pre-filter that picks the
-  # 1-3 most relevant schemas per question.
+  # Only the first schema touched pays the one-time KG build cost; questions
+  # are routed through a cheap Haiku pre-filter that picks the 1-3 most
+  # relevant schemas per question.
   #
   # Pin to a single schema (e.g. `active: hs_graph`) if you want to scope
   # every question to that schema only — routing is skipped when active = 1.
-  active: hs_*
+  active: hs_*,mixpanel_*
 
   # Baseline PHI-unsafe column-name patterns. Case-insensitive substring match.
   phi_skip_patterns:
