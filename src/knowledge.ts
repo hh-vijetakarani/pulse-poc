@@ -57,6 +57,22 @@ function isFresh(path: string): boolean {
   return Date.now() - statSync(path).mtimeMs < CACHE_TTL_MS;
 }
 
+// Stricter check for KG caches: also invalidate when the curated topic doc
+// has been edited since the KG was built. The KG bakes derivable_metrics
+// from the doc into its SQL patterns; if the doc changes, those patterns go
+// stale and will keep steering SQL gen toward the old behavior even after
+// notes_excerpt is reloaded fresh. Tying KG freshness to doc mtime makes
+// doc edits self-healing on the next Pulse restart.
+function isKgCacheFresh(kgPath: string, notesDocPath?: string): boolean {
+  if (!existsSync(kgPath)) return false;
+  const kgMtime = statSync(kgPath).mtimeMs;
+  if (Date.now() - kgMtime >= CACHE_TTL_MS) return false;
+  if (notesDocPath && existsSync(notesDocPath)) {
+    if (statSync(notesDocPath).mtimeMs > kgMtime) return false;
+  }
+  return true;
+}
+
 export interface SchemaInputs {
   cfg: SchemaConfig;
   schema: TableSchema[];
@@ -85,8 +101,9 @@ async function buildSchemaKg(
 ): Promise<KnowledgeGraph> {
   const { cfg, schema, samples, tags, proto, dbt } = input;
   const kgPath = resolve(schemaCacheDir(cfg.id), "knowledge-graph.json");
+  const notesPath = cfg.notes_doc ? resolve(cfg.notes_doc) : undefined;
 
-  if (isFresh(kgPath)) {
+  if (isKgCacheFresh(kgPath, notesPath)) {
     try {
       const cached = JSON.parse(readFileSync(kgPath, "utf-8")) as KnowledgeGraph;
       // Run cached KGs through the same normalization path — protects against
