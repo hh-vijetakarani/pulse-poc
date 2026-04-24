@@ -21,9 +21,10 @@ KG builder as a parallel context source (alongside schema + samples).
 
 `prod.mixpanel_phoenix.event` is the primary fact table — one row per Mixpanel
 event captured by the Phoenix (HingeSelect) client, synced via Fivetran from
-Mixpanel to Databricks. The 90-day materialized view `event_90day_mv` is
-much faster to query for recent-events questions; prefer it for any question
-scoped to ≤90 days.
+Mixpanel to Databricks. **Always query `event` directly for Care Search and
+other product-feature questions** — the 90-day materialized view
+`event_90day_mv` is currently stale (see DQ section below) and missing entire
+event families.
 
 `prod.mixpanel_phoenix.event_types` is a **lookup table** with one row per
 distinct event name in the system. **This is the source of truth for the
@@ -73,23 +74,25 @@ title case, or domain-prefixed variants. Use what the table returns.
 
 ### Step 2 — count users who used Care Search (the simple case)
 
-For "how many customers/users used Care Search in the last N days":
+For "how many customers/users used Care Search in the last N days", query the
+full `event` table directly (NOT `event_90day_mv` — see DQ note):
 
 ```sql
 SELECT COUNT(DISTINCT e.distinct_id) AS users_using_care_search
-FROM prod.mixpanel_phoenix.event_90day_mv e
+FROM prod.mixpanel_phoenix.event e
 WHERE e.name IN (
   SELECT name
   FROM prod.mixpanel_phoenix.event_types
-  WHERE LOWER(name) LIKE '%care_search%'
-     OR LOWER(name) LIKE '%care search%'
+  WHERE LOWER(name) LIKE '%care search%'
      OR LOWER(name) LIKE '%caresearch%'
 )
 AND e.time >= DATEADD(DAY, -90, CURRENT_DATE());
 ```
 
-Note: `event_90day_mv` is **already scoped to the last 90 days** — but adding
-the explicit `time >=` predicate is defensive (mat-views can be stale).
+The `event` table is partitioned/clustered by `time`, so the time predicate
+prunes data efficiently even though the table has 39B rows. Real event names
+in the data use TitleCase with spaces (e.g. "Care Search Viewed", "Care
+Search Provider Clicked") — the lowered LIKE patterns above match them.
 
 ### Step 3 — drop-off / funnel analysis
 
@@ -100,15 +103,15 @@ pattern. The exact stage events get discovered from `event_types`:
 WITH discovered_events AS (
   SELECT name AS event_name
   FROM prod.mixpanel_phoenix.event_types
-  WHERE LOWER(name) LIKE '%care_search%'
-     OR LOWER(name) LIKE '%care search%'
+  WHERE LOWER(name) LIKE '%care search%'
+     OR LOWER(name) LIKE '%caresearch%'
 ),
 user_events AS (
   SELECT
     e.distinct_id,
     e.name AS event_name,
     e.time
-  FROM prod.mixpanel_phoenix.event_90day_mv e
+  FROM prod.mixpanel_phoenix.event e
   WHERE e.name IN (SELECT event_name FROM discovered_events)
     AND e.time >= DATEADD(DAY, -30, CURRENT_DATE())
 )
@@ -139,6 +142,22 @@ first.**
 ---
 
 ## Known data-quality issues
+
+### ⚠ event_90day_mv is stale and incomplete (confirmed 2026-04-24)
+
+The 90-day materialized view `prod.mixpanel_phoenix.event_90day_mv` is
+currently broken in two ways:
+- **Frozen**: latest `time` value in the view is `2025-04-01` — over a year
+  out of date as of this writing.
+- **Missing event families**: even ignoring the time staleness, no rows
+  matching `LIKE '%care search%'` exist in the view at all, while the
+  underlying `event` table has 686+ "Care Search Viewed" rows in the last
+  90 days alone.
+
+**Implication for Pulse:** never use `event_90day_mv` for product-feature
+analysis. Always query the full `event` table with an explicit
+`time >= DATEADD(DAY, -N, CURRENT_DATE())` predicate. Partition pruning on
+`time` makes the full-table query reasonably fast despite the 39B-row size.
 
 ### ⚠ Session Complete under-reporting (reported 2026-04-23)
 
@@ -209,10 +228,10 @@ WHERE ...
 
 | Question | Pattern |
 |---|---|
-| "How many customers/users use Care Search?" | COUNT DISTINCT distinct_id from `event_90day_mv` filtered to event names found in `event_types` matching `%care_search%`/`%care search%` |
-| "Where are users dropping off in Care Search?" | Discover events from `event_types` → pivot stage counts; see Step 3 SQL above |
-| "What's the most common search query?" | First find the query event name in `event_types` (e.g. matching `%search_query%`), then `SELECT properties:query, COUNT(*) FROM event_90day_mv WHERE name = <discovered>` |
-| "Which providers get clicked the most?" | First find the click event name in `event_types`, then `SELECT properties:provider_id, COUNT(*) WHERE name = <discovered>` |
+| "How many customers/users use Care Search?" | COUNT DISTINCT distinct_id from `event` (NOT `event_90day_mv`) with `time >= DATEADD(DAY, -90, CURRENT_DATE())`, filtered to event names from `event_types` matching `%care search%`/`%caresearch%` |
+| "Where are users dropping off in Care Search?" | Discover events from `event_types` → pivot stage counts on `event`; see Step 3 SQL above |
+| "What's the most common search query?" | First find the query event name in `event_types`, then `SELECT properties:query, COUNT(*) FROM event WHERE name = <discovered> AND time >= ...` |
+| "Which providers get clicked the most?" | First find the click event name in `event_types`, then `SELECT properties:provider_id, COUNT(*) FROM event WHERE name = <discovered> AND time >= ...` |
 | "Session duration for Care Search users" | Requires session-boundary events; ⚠ watch for the known Session Complete sync issue (1% vs 90%+) |
 
 **Pattern:** every Mixpanel question starts with a discovery query against
