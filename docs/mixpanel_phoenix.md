@@ -5,13 +5,30 @@ Context for Pulse's KG builder + SQL generator when answering questions against
 funnel, key identifier columns, and known data-quality issues. Loaded by the
 KG builder as a parallel context source (alongside schema + samples).
 
+> **CRITICAL — read first.** Do NOT hardcode event names anywhere. The
+> canonical event taxonomy lives in `prod.mixpanel_phoenix.event_types`. The
+> raw event tables (`event`, `event_90day_mv`, `event_view`) have 2.8B–39B
+> rows and DISTINCT sampling is skipped — meaning Pulse cannot enumerate
+> event names from them directly.
+>
+> **Always query `event_types` first** to discover the actual event names
+> matching a feature (Care Search, Onboarding, etc.), then use those names
+> to filter the event tables. Patterns below.
+
 ---
 
 ## Event model
 
-`prod.mixpanel_phoenix.event` is the primary fact table. Each row is one
-Mixpanel event captured by the Phoenix (HingeSelect) client, synced via
-Fivetran from Mixpanel to Databricks.
+`prod.mixpanel_phoenix.event` is the primary fact table — one row per Mixpanel
+event captured by the Phoenix (HingeSelect) client, synced via Fivetran from
+Mixpanel to Databricks. The 90-day materialized view `event_90day_mv` is
+much faster to query for recent-events questions; prefer it for any question
+scoped to ≤90 days.
+
+`prod.mixpanel_phoenix.event_types` is a **lookup table** with one row per
+distinct event name in the system. **This is the source of truth for the
+event taxonomy.** Always query it to discover event names rather than
+guessing or hardcoding strings.
 
 ### Core columns (expected — verify against actual schema)
 
@@ -32,67 +49,92 @@ Fivetran from Mixpanel to Databricks.
 
 ---
 
-## Care Search funnel (manually curated)
+## Care Search funnel — discover events first, never hardcode
 
-The Care Search feature in Phoenix follows this typical user flow. Each stage
-corresponds to one or more `event_name` values. When Pulse answers drop-off
-questions, it should compute stage-to-stage conversion rates using these
-events as funnel steps.
+The Care Search feature in Phoenix has a multi-stage user flow (entry →
+search → results → click → profile → appointment). Stage names are
+illustrative — the actual event names live in `event_types` and **MUST** be
+discovered at query time, not assumed.
 
-| Stage | Event name(s) (approx — verify) | What it means |
-|---|---|---|
-| 1. Entry | `Care Search Opened` | User opened the Care Search surface |
-| 2. Query | `Care Search Query Entered` | User typed a search query |
-| 3. Filter | `Care Search Filter Applied` | User narrowed results (specialty, location, etc.) |
-| 4. Results viewed | `Care Search Results Viewed` | User scrolled the result list |
-| 5. Result click | `Care Search Result Clicked` | User tapped a provider card |
-| 6. Profile view | `Provider Profile Viewed` | User landed on a provider detail page |
-| 7. Appointment intent | `Appointment Slot Viewed` | User saw appointment options |
-| 8. Booking attempt | `Appointment Booking Started` | User started the booking flow |
-| 9. Booking complete | `Appointment Booked` | User completed the booking |
-
-### SQL pattern for drop-off analysis
-
-For "where are users dropping off in Care Search," generate SQL similar to:
+### Step 1 — discover the actual Care Search event names
 
 ```sql
-WITH funnel AS (
-  SELECT
-    distinct_id,
-    MAX(CASE WHEN event_name = 'Care Search Opened' THEN 1 ELSE 0 END) AS stage_1,
-    MAX(CASE WHEN event_name = 'Care Search Query Entered' THEN 1 ELSE 0 END) AS stage_2,
-    MAX(CASE WHEN event_name = 'Care Search Filter Applied' THEN 1 ELSE 0 END) AS stage_3,
-    MAX(CASE WHEN event_name = 'Care Search Results Viewed' THEN 1 ELSE 0 END) AS stage_4,
-    MAX(CASE WHEN event_name = 'Care Search Result Clicked' THEN 1 ELSE 0 END) AS stage_5,
-    MAX(CASE WHEN event_name = 'Provider Profile Viewed' THEN 1 ELSE 0 END) AS stage_6,
-    MAX(CASE WHEN event_name = 'Appointment Slot Viewed' THEN 1 ELSE 0 END) AS stage_7,
-    MAX(CASE WHEN event_name = 'Appointment Booking Started' THEN 1 ELSE 0 END) AS stage_8,
-    MAX(CASE WHEN event_name = 'Appointment Booked' THEN 1 ELSE 0 END) AS stage_9
-  FROM prod.mixpanel_phoenix.event
-  WHERE time >= DATEADD(DAY, -30, CURRENT_DATE())
-    AND event_name LIKE 'Care Search%' OR event_name IN ('Provider Profile Viewed', 'Appointment Slot Viewed', 'Appointment Booking Started', 'Appointment Booked')
-  GROUP BY distinct_id
-)
-SELECT
-  SUM(stage_1) AS opened,
-  SUM(stage_2) AS typed_query,
-  SUM(stage_3) AS applied_filter,
-  SUM(stage_4) AS viewed_results,
-  SUM(stage_5) AS clicked_result,
-  SUM(stage_6) AS viewed_profile,
-  SUM(stage_7) AS viewed_slots,
-  SUM(stage_8) AS started_booking,
-  SUM(stage_9) AS booked
-FROM funnel;
+SELECT name
+FROM prod.mixpanel_phoenix.event_types
+WHERE LOWER(name) LIKE '%care_search%'
+   OR LOWER(name) LIKE '%care search%'
+   OR LOWER(name) LIKE '%caresearch%'
+ORDER BY name;
 ```
 
-The biggest drop-off is usually identifiable by the largest percentage gap
-between sequential stages.
+This returns whatever events match — caller should NOT assume specific names
+like "Care Search Opened." HH may use snake_case (`care_search_opened`),
+title case, or domain-prefixed variants. Use what the table returns.
 
-### Variant: session-scoped funnel
+### Step 2 — count users who used Care Search (the simple case)
 
-For "users who complete the funnel within one session," scope the MAX()
-aggregation to `session_id` instead of `distinct_id`.
+For "how many customers/users used Care Search in the last N days":
+
+```sql
+SELECT COUNT(DISTINCT e.distinct_id) AS users_using_care_search
+FROM prod.mixpanel_phoenix.event_90day_mv e
+WHERE e.name IN (
+  SELECT name
+  FROM prod.mixpanel_phoenix.event_types
+  WHERE LOWER(name) LIKE '%care_search%'
+     OR LOWER(name) LIKE '%care search%'
+     OR LOWER(name) LIKE '%caresearch%'
+)
+AND e.time >= DATEADD(DAY, -90, CURRENT_DATE());
+```
+
+Note: `event_90day_mv` is **already scoped to the last 90 days** — but adding
+the explicit `time >=` predicate is defensive (mat-views can be stale).
+
+### Step 3 — drop-off / funnel analysis
+
+For "where are users dropping off in Care Search," use a discovery-then-pivot
+pattern. The exact stage events get discovered from `event_types`:
+
+```sql
+WITH discovered_events AS (
+  SELECT name AS event_name
+  FROM prod.mixpanel_phoenix.event_types
+  WHERE LOWER(name) LIKE '%care_search%'
+     OR LOWER(name) LIKE '%care search%'
+),
+user_events AS (
+  SELECT
+    e.distinct_id,
+    e.name AS event_name,
+    e.time
+  FROM prod.mixpanel_phoenix.event_90day_mv e
+  WHERE e.name IN (SELECT event_name FROM discovered_events)
+    AND e.time >= DATEADD(DAY, -30, CURRENT_DATE())
+)
+SELECT
+  event_name,
+  COUNT(DISTINCT distinct_id) AS unique_users,
+  COUNT(*) AS total_events
+FROM user_events
+GROUP BY event_name
+ORDER BY unique_users DESC;
+```
+
+This shows volume by event name; ordering events along a typical funnel
+(entry → search → click → conversion) reveals the largest drop-off step.
+
+For a precise stage-to-stage funnel, **first run Step 1** to see the actual
+event taxonomy, then use those exact names in a `MAX(CASE WHEN name = '...' )`
+pivot like a standard Mixpanel-style funnel — but only with names that
+actually exist in `event_types`.
+
+### Why we don't hardcode
+
+Earlier versions of this doc listed presumed event names. They returned 0
+rows because the actual event names use a different convention. The
+`event_types` lookup is the only safe source of truth. **Always query it
+first.**
 
 ---
 
@@ -167,11 +209,16 @@ WHERE ...
 
 | Question | Pattern |
 |---|---|
-| "Where are users dropping off in Care Search?" | Stage-over-stage conversion (SQL above) |
-| "How many users completed Care Search last week?" | COUNT DISTINCT distinct_id WHERE event_name = 'Appointment Booked' AND time >= last 7d |
-| "What's the most common search query?" | SELECT properties.query, COUNT(*) FROM event WHERE event_name = 'Care Search Query Entered' |
-| "Which providers get clicked the most?" | SELECT properties.provider_id, COUNT(*) WHERE event_name = 'Care Search Result Clicked' |
-| "Session duration for Care Search users" | Requires session boundary events; watch for the known Session Complete bug |
+| "How many customers/users use Care Search?" | COUNT DISTINCT distinct_id from `event_90day_mv` filtered to event names found in `event_types` matching `%care_search%`/`%care search%` |
+| "Where are users dropping off in Care Search?" | Discover events from `event_types` → pivot stage counts; see Step 3 SQL above |
+| "What's the most common search query?" | First find the query event name in `event_types` (e.g. matching `%search_query%`), then `SELECT properties:query, COUNT(*) FROM event_90day_mv WHERE name = <discovered>` |
+| "Which providers get clicked the most?" | First find the click event name in `event_types`, then `SELECT properties:provider_id, COUNT(*) WHERE name = <discovered>` |
+| "Session duration for Care Search users" | Requires session-boundary events; ⚠ watch for the known Session Complete sync issue (1% vs 90%+) |
+
+**Pattern:** every Mixpanel question starts with a discovery query against
+`event_types` to find the relevant event names. Only then filter the
+event tables. This pattern is robust to taxonomy changes and avoids the
+silent-zero failure mode caused by hardcoded names that don't exist.
 
 ---
 
